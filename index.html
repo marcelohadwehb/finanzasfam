@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Finanzas Familiares</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase Libraries -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        setLogLevel('debug');
+        
+        let db;
+        let auth;
+        let userId;
+        let appId; // Variable global para el ID de la aplicación
+
+        const ingresosData = [];
+        const gastosData = [];
+
+        // Definición de categorías y subcategorías
+        const categoriasGastos = [
+            { categoria: 'Fijos del hogar', subcategorias: ['Dividendo', 'Luz', 'Agua', 'Gas', 'Basura', 'Wifi', 'Streaming', 'Mantención Aire', 'Plan móvil'] },
+            { categoria: 'Alimentación', subcategorias: ['Supermercado', 'Feria'] },
+            { categoria: 'Educación', subcategorias: ['Matrícula', 'Arancel'] },
+            { categoria: 'Transporte', subcategorias: ['BIP', 'Combustible', 'Permiso circulación', 'Mantención', 'TAG'] },
+            { categoria: 'Gin', subcategorias: ['Comida', 'Salud'] },
+            { categoria: 'Eventos', subcategorias: ['Navidad', 'Vacaciones', 'Cumple hija', 'Cumple BR', 'Cumple DT', 'Cumpleaños'] },
+            { categoria: 'Presupuestos individuales', subcategorias: ['Presupuesto BR', 'Presupuesto Hija', 'Presupuesto DT'] }
+        ];
+
+        // UI elements
+        const views = {
+            ingresos: document.getElementById('ingresosView'),
+            gastos: document.getElementById('gastosView'),
+            presupuesto: document.getElementById('presupuestoView'),
+            balances: document.getElementById('balancesView')
+        };
+        const navButtons = {
+            ingresos: document.getElementById('navIngresos'),
+            gastos: document.getElementById('navGastos'),
+            presupuesto: document.getElementById('navPresupuesto'),
+            balances: document.getElementById('navBalances')
+        };
+        const monthSelect = document.getElementById('monthSelect');
+        const yearSelect = document.getElementById('yearSelect');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+
+        // Functions to switch between views
+        const showView = (viewName) => {
+            Object.values(views).forEach(view => view.classList.add('hidden'));
+            Object.values(navButtons).forEach(btn => btn.classList.remove('bg-purple-700', 'text-white'));
+            views[viewName].classList.remove('hidden');
+            navButtons[viewName].classList.add('bg-purple-700', 'text-white');
+        };
+
+        // Initialize Firebase and set up listeners
+        const initFirebase = async () => {
+            console.log("Inicializando Firebase...");
+            try {
+                appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error('La configuración de Firebase no está definida.');
+                    return;
+                }
+
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Auth state listener
+                onAuthStateChanged(auth, async (user) => {
+                    console.log("El estado de autenticación ha cambiado. Usuario:", user);
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = `ID de Usuario: ${userId}`;
+                        console.log("El usuario está autenticado. UID:", user.uid);
+                        setupRealtimeListeners();
+                        renderIngresos();
+                        renderGastos();
+                        renderPresupuesto();
+                        renderBalances();
+                    } else {
+                        console.log("El usuario no está autenticado. Iniciando sesión de forma anónima.");
+                        await signInAnonymously(auth);
+                    }
+                });
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Error al inicializar Firebase:", error);
+            }
+        };
+
+        // Real-time data listeners
+        const setupRealtimeListeners = () => {
+            if (!db || !userId) {
+                console.error("La base de datos o el ID de usuario no están listos. No se pueden configurar los listeners.");
+                return;
+            }
+            
+            const ingresosPath = `artifacts/${appId}/users/${userId}/ingresos`;
+            onSnapshot(collection(db, ingresosPath), (snapshot) => {
+                ingresosData.length = 0;
+                snapshot.forEach(doc => {
+                    ingresosData.push({ id: doc.id, ...doc.data() });
+                });
+                renderIngresos();
+                renderBalances();
+                renderPresupuesto();
+            });
+
+            const gastosPath = `artifacts/${appId}/users/${userId}/gastos`;
+            onSnapshot(collection(db, gastosPath), (snapshot) => {
+                gastosData.length = 0;
+                snapshot.forEach(doc => {
+                    gastosData.push({ id: doc.id, ...doc.data() });
+                });
+                renderGastos();
+                renderPresupuesto();
+                renderBalances();
+            });
+        };
+
+        // --- Render Functions ---
+
+        // Render Ingresos View
+        const renderIngresos = () => {
+            const container = document.getElementById('ingresosList');
+            if (!container) return;
+            container.innerHTML = '';
+            
+            const table = document.createElement('table');
+            table.className = 'min-w-full divide-y divide-gray-200';
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fecha</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Descripción</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Monto</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    ${ingresosData.map(ingreso => `
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap">${new Date(ingreso.fecha).toLocaleDateString()}</td>
+                            <td class="px-6 py-4 whitespace-nowrap">${ingreso.descripcion}</td>
+                            <td class="px-6 py-4 whitespace-nowrap">$${ingreso.monto.toLocaleString()}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                <button onclick="startEditIngreso('${ingreso.id}')" class="text-indigo-600 hover:text-indigo-900 mr-4">Editar</button>
+                                <button onclick="deleteIngreso('${ingreso.id}')" class="text-red-600 hover:text-red-900">Eliminar</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            `;
+            container.appendChild(table);
+        };
+
+        // Render Gastos View
+        const renderGastos = () => {
+            const container = document.getElementById('gastosList');
+            if (!container) return;
+            container.innerHTML = '';
+
+            const table = document.createElement('table');
+            table.className = 'min-w-full divide-y divide-gray-200';
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fecha</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Categoría</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Subcategoría</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Monto</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    ${gastosData.map(gasto => `
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap">${new Date(gasto.fecha).toLocaleDateString()}</td>
+                            <td class="px-6 py-4 whitespace-nowrap">${gasto.categoria}</td>
+                            <td class="px-6 py-4 whitespace-nowrap">${gasto.subcategoria}</td>
+                            <td class="px-6 py-4 whitespace-nowrap">$${gasto.monto.toLocaleString()}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                <button onclick="startEditGasto('${gasto.id}')" class="text-indigo-600 hover:text-indigo-900 mr-4">Editar</button>
+                                <button onclick="deleteGasto('${gasto.id}')" class="text-red-600 hover:text-red-900">Eliminar</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            `;
+            container.appendChild(table);
+        };
+
+        // Render Presupuesto View
+        const renderPresupuesto = () => {
+            const container = document.getElementById('presupuestoList');
+            if (!container) return;
+            container.innerHTML = '';
+            
+            const selectedMonth = parseInt(monthSelect.value);
+            const selectedYear = parseInt(yearSelect.value);
+
+            const totalIngresado = ingresosData
+                .filter(i => new Date(i.fecha).getMonth() + 1 === selectedMonth && new Date(i.fecha).getFullYear() === selectedYear)
+                .reduce((sum, i) => sum + parseFloat(i.monto), 0);
+
+            const totalIngresadoDisplay = document.getElementById('totalIngresadoDisplay');
+            if(totalIngresadoDisplay) {
+                totalIngresadoDisplay.textContent = `$${totalIngresado.toLocaleString()}`;
+            }
+
+            const table = document.createElement('table');
+            table.className = 'min-w-full divide-y divide-gray-200';
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Categoría</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Subcategoría</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Gastado</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    ${categoriasGastos.map(cat => cat.subcategorias.map(subcat => {
+                        const totalGastado = gastosData
+                            .filter(g => g.subcategoria === subcat && g.mes === selectedMonth && new Date(g.fecha).getFullYear() === selectedYear)
+                            .reduce((sum, g) => sum + parseFloat(g.monto), 0);
+                        return `
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap">${cat.categoria}</td>
+                                <td class="px-6 py-4 whitespace-nowrap">${subcat}</td>
+                                <td class="px-6 py-4 whitespace-nowrap">$${totalGastado.toLocaleString()}</td>
+                            </tr>
+                        `;
+                    }).join('')).join('')}
+                </tbody>
+            `;
+            container.appendChild(table);
+        };
+
+        // Render Balances View
+        const renderBalances = () => {
+            const container = document.getElementById('balancesList');
+            if (!container) return;
+            container.innerHTML = '';
+
+            const selectedMonth = parseInt(monthSelect.value);
+            const selectedYear = parseInt(yearSelect.value);
+
+            const totalIngresos = ingresosData
+                .filter(i => i.mes === selectedMonth && new Date(i.fecha).getFullYear() === selectedYear)
+                .reduce((sum, i) => sum + parseFloat(i.monto), 0);
+
+            const totalGastos = gastosData
+                .filter(g => g.mes === selectedMonth && new Date(g.fecha).getFullYear() === selectedYear)
+                .reduce((sum, g) => sum + parseFloat(g.monto), 0);
+            
+            const balanceGeneral = totalIngresos - totalGastos;
+
+            const data = [
+                { label: 'Total Ingresos', value: totalIngresos },
+                { label: 'Total Gastos', value: totalGastos },
+                { label: 'Balance General', value: balanceGeneral }
+            ];
+
+            const table = document.createElement('table');
+            table.className = 'min-w-full divide-y divide-gray-200';
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Indicador</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Monto</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    ${data.map(item => `
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap">${item.label}</td>
+                            <td class="px-6 py-4 whitespace-nowrap">$${item.value.toLocaleString()}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            `;
+            container.appendChild(table);
+        };
+        
+        // --- CRUD Operations Handlers ---
+
+        // Start edit process for an income record
+        window.startEditIngreso = (id) => {
+            const ingreso = ingresosData.find(i => i.id === id);
+            if (!ingreso) return;
+
+            document.getElementById('ingresoFecha').value = new Date(ingreso.fecha).toISOString().split('T')[0];
+            document.getElementById('ingresoDescripcion').value = ingreso.descripcion;
+            document.getElementById('ingresoMonto').value = ingreso.monto;
+            document.getElementById('ingresoEditId').value = id;
+            document.getElementById('ingresoSubmitBtn').textContent = 'Guardar Cambios';
+            document.getElementById('ingresoCancelBtn').classList.remove('hidden');
+        };
+
+        // Start edit process for a gasto record
+        window.startEditGasto = (id) => {
+            const gasto = gastosData.find(g => g.id === id);
+            if (!gasto) return;
+            
+            document.getElementById('gastoFecha').value = new Date(gasto.fecha).toISOString().split('T')[0];
+            document.getElementById('gastoCategoria').value = gasto.categoria;
+            document.getElementById('gastoSubcategoria').innerHTML = ''; // Clear and repopulate
+            const selectedCatObj = categoriasGastos.find(c => c.categoria === gasto.categoria);
+            if (selectedCatObj) {
+                selectedCatObj.subcategorias.forEach(subcat => {
+                    const option = document.createElement('option');
+                    option.value = subcat;
+                    option.textContent = subcat;
+                    document.getElementById('gastoSubcategoria').appendChild(option);
+                });
+            }
+            document.getElementById('gastoSubcategoria').value = gasto.subcategoria;
+            document.getElementById('gastoMonto').value = gasto.monto;
+            document.getElementById('gastoEditId').value = id;
+            document.getElementById('gastoSubmitBtn').textContent = 'Guardar Cambios';
+            document.getElementById('gastoCancelBtn').classList.remove('hidden');
+        };
+
+        // Cancel edit process and reset form
+        const cancelEdit = () => {
+            document.getElementById('ingresoForm').reset();
+            document.getElementById('ingresoEditId').value = '';
+            document.getElementById('ingresoSubmitBtn').textContent = 'Añadir Ingreso';
+            document.getElementById('ingresoCancelBtn').classList.add('hidden');
+
+            document.getElementById('gastoForm').reset();
+            populateDropdowns();
+            document.getElementById('gastoEditId').value = '';
+            document.getElementById('gastoSubmitBtn').textContent = 'Añadir Gasto';
+            document.getElementById('gastoCancelBtn').classList.add('hidden');
+        };
+
+        // Show confirmation modal
+        const showConfirmModal = (message, onConfirm, onCancel) => {
+            const modal = document.getElementById('confirmModal');
+            const modalMessage = document.getElementById('modalMessage');
+            const confirmBtn = document.getElementById('confirmBtn');
+            const cancelBtn = document.getElementById('cancelBtn');
+
+            modalMessage.textContent = message;
+            modal.classList.remove('hidden');
+            
+            const handleConfirm = () => {
+                onConfirm();
+                modal.classList.add('hidden');
+                confirmBtn.removeEventListener('click', handleConfirm);
+                cancelBtn.removeEventListener('click', handleCancel);
+            };
+
+            const handleCancel = () => {
+                if (onCancel) onCancel();
+                modal.classList.add('hidden');
+                confirmBtn.removeEventListener('click', handleConfirm);
+                cancelBtn.removeEventListener('click', handleCancel);
+            };
+
+            confirmBtn.addEventListener('click', handleConfirm);
+            cancelBtn.addEventListener('click', handleCancel);
+        };
+
+        // Delete an income record
+        window.deleteIngreso = (id) => {
+            showConfirmModal("¿Estás seguro de que quieres eliminar este ingreso?", async () => {
+                if (!db || !userId) {
+                    console.error("Autenticación o base de datos no están listos. No se puede eliminar el ingreso.");
+                    return;
+                }
+                const ingresoRef = doc(db, `artifacts/${appId}/users/${userId}/ingresos`, id);
+                try {
+                    await deleteDoc(ingresoRef);
+                    console.log("Ingreso eliminado exitosamente.");
+                } catch (error) {
+                    console.error("Error al eliminar el ingreso:", error);
+                }
+            });
+        };
+
+        // Delete a gasto record
+        window.deleteGasto = (id) => {
+            showConfirmModal("¿Estás seguro de que quieres eliminar este gasto?", async () => {
+                if (!db || !userId) {
+                    console.error("Autenticación o base de datos no están listos. No se puede eliminar el gasto.");
+                    return;
+                }
+                const gastoRef = doc(db, `artifacts/${appId}/users/${userId}/gastos`, id);
+                try {
+                    await deleteDoc(gastoRef);
+                    console.log("Gasto eliminado exitosamente.");
+                } catch (error) {
+                    console.error("Error al eliminar el gasto:", error);
+                }
+            });
+        };
+
+        // Handle new income submission or update
+        const handleAddIngreso = async (event) => {
+            event.preventDefault();
+            const fecha = document.getElementById('ingresoFecha').value;
+            const descripcion = document.getElementById('ingresoDescripcion').value;
+            const monto = document.getElementById('ingresoMonto').value;
+            const editId = document.getElementById('ingresoEditId').value;
+
+            if (!fecha || !descripcion || !monto) {
+                return;
+            }
+
+            if (!userId || !db) {
+                console.error("Autenticación o base de datos no están listos. No se puede añadir/actualizar el ingreso.");
+                return;
+            }
+
+            const ingresoData = {
+                fecha: new Date(fecha).toISOString(),
+                descripcion: descripcion,
+                monto: parseFloat(monto),
+                mes: new Date(fecha).getMonth() + 1,
+                año: new Date(fecha).getFullYear()
+            };
+
+            const ingresosPath = `artifacts/${appId}/users/${userId}/ingresos`;
+            try {
+                if (editId) {
+                    await updateDoc(doc(db, ingresosPath, editId), ingresoData);
+                    console.log("Ingreso actualizado exitosamente.");
+                } else {
+                    await addDoc(collection(db, ingresosPath), { ...ingresoData, timestamp: serverTimestamp() });
+                    console.log("Ingreso añadido exitosamente.");
+                }
+                cancelEdit();
+            } catch (error) {
+                console.error("Error al añadir/actualizar el ingreso:", error);
+            }
+        };
+
+        // Handle new expense submission or update
+        const handleAddGasto = async (event) => {
+            event.preventDefault();
+            const fecha = document.getElementById('gastoFecha').value;
+            const categoria = document.getElementById('gastoCategoria').value;
+            const subcategoria = document.getElementById('gastoSubcategoria').value;
+            const monto = document.getElementById('gastoMonto').value;
+            const editId = document.getElementById('gastoEditId').value;
+
+            if (!fecha || !categoria || !subcategoria || !monto) {
+                return;
+            }
+            
+            if (!userId || !db) {
+                console.error("Autenticación o base de datos no están listos. No se puede añadir/actualizar el gasto.");
+                return;
+            }
+
+            const gastoData = {
+                fecha: new Date(fecha).toISOString(),
+                categoria: categoria,
+                subcategoria: subcategoria,
+                monto: parseFloat(monto),
+                mes: new Date(fecha).getMonth() + 1,
+                año: new Date(fecha).getFullYear()
+            };
+
+            const gastosPath = `artifacts/${appId}/users/${userId}/gastos`;
+            try {
+                if (editId) {
+                    await updateDoc(doc(db, gastosPath, editId), gastoData);
+                    console.log("Gasto actualizado exitosamente.");
+                } else {
+                    await addDoc(collection(db, gastosPath), { ...gastoData, timestamp: serverTimestamp() });
+                    console.log("Gasto añadido exitosamente.");
+                }
+                cancelEdit();
+            } catch (error) {
+                console.error("Error al añadir/actualizar el gasto:", error);
+            }
+        };
+
+        // Export data to CSV
+        const exportToExcel = () => {
+            const allData = [...ingresosData, ...gastosData];
+            if (allData.length === 0) {
+                console.log("No hay datos para exportar.");
+                return;
+            }
+
+            // Create CSV content
+            let csvContent = "data:text/csv;charset=utf-8,";
+            
+            // Header row
+            const headers = ['Tipo', 'Fecha', 'Descripción', 'Categoría', 'Subcategoría', 'Monto', 'Mes', 'Año'];
+            csvContent += headers.join(',') + '\n';
+
+            // Data rows
+            allData.forEach(item => {
+                const tipo = item.descripcion ? 'Ingreso' : 'Gasto';
+                const fecha = new Date(item.fecha).toLocaleDateString();
+                const descripcion = item.descripcion ? item.descripcion : '';
+                const categoria = item.categoria ? item.categoria : '';
+                const subcategoria = item.subcategoria ? item.subcategoria : '';
+                const monto = item.monto;
+                const mes = item.mes;
+                const año = item.año;
+
+                const row = [tipo, fecha, descripcion, categoria, subcategoria, monto, mes, año].map(value => {
+                    const stringValue = value === null || value === undefined ? '' : String(value);
+                    return `"${stringValue.replace(/"/g, '""')}"`; // Handle commas and quotes in data
+                }).join(',');
+                csvContent += row + '\n';
+            });
+            
+            // Trigger download
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement('a');
+            link.setAttribute('href', encodedUri);
+            link.setAttribute('download', 'finanzas_reporte.csv');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        };
+        window.exportToExcel = exportToExcel;
+
+        // Populate dropdowns
+        const populateDropdowns = () => {
+            const categoriaSelect = document.getElementById('gastoCategoria');
+            const subcategoriaSelect = document.getElementById('gastoSubcategoria');
+
+            categoriaSelect.innerHTML = '<option value="" disabled selected>Selecciona una categoría</option>';
+            subcategoriaSelect.innerHTML = '<option value="" disabled selected>Selecciona una subcategoría</option>';
+
+            categoriasGastos.forEach(cat => {
+                const option = document.createElement('option');
+                option.value = cat.categoria;
+                option.textContent = cat.categoria;
+                categoriaSelect.appendChild(option);
+            });
+
+            categoriaSelect.addEventListener('change', () => {
+                subcategoriaSelect.innerHTML = '<option value="" disabled selected>Selecciona una subcategoría</option>';
+                const selectedCat = categoriaSelect.value;
+                const catObj = categoriasGastos.find(c => c.categoria === selectedCat);
+                if (catObj) {
+                    catObj.subcategorias.forEach(subcat => {
+                        const option = document.createElement('option');
+                        option.value = subcat;
+                        option.textContent = subcat;
+                        subcategoriaSelect.appendChild(option);
+                    });
+                }
+            });
+
+            // Populate month select
+            const now = new Date();
+            const currentMonth = now.getMonth() + 1;
+            for (let i = 1; i <= 12; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = i;
+                if (i === currentMonth) {
+                    option.selected = true;
+                }
+                monthSelect.appendChild(option);
+            }
+
+            // Populate year select
+            const currentYear = now.getFullYear();
+            const startYear = 2025;
+            for (let i = startYear; i <= currentYear + 5; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = i;
+                if (i === currentYear) {
+                    option.selected = true;
+                }
+                yearSelect.appendChild(option);
+            }
+        };
+
+        // --- Event Listeners ---
+        document.addEventListener('DOMContentLoaded', () => {
+            initFirebase();
+            populateDropdowns();
+
+            // Navigation
+            navButtons.ingresos.addEventListener('click', () => showView('ingresos'));
+            navButtons.gastos.addEventListener('click', () => showView('gastos'));
+            navButtons.presupuesto.addEventListener('click', () => {
+                showView('presupuesto');
+                renderPresupuesto();
+            });
+            navButtons.balances.addEventListener('click', () => {
+                showView('balances');
+                renderBalances();
+            });
+
+            // Forms
+            document.getElementById('ingresoForm').addEventListener('submit', handleAddIngreso);
+            document.getElementById('gastoForm').addEventListener('submit', handleAddGasto);
+            
+            // Re-render views on month or year change
+            monthSelect.addEventListener('change', () => {
+                renderPresupuesto();
+                renderBalances();
+            });
+            yearSelect.addEventListener('change', () => {
+                renderPresupuesto();
+                renderBalances();
+            });
+
+            // Cancel edit buttons
+            document.getElementById('ingresoCancelBtn').addEventListener('click', cancelEdit);
+            document.getElementById('gastoCancelBtn').addEventListener('click', cancelEdit);
+
+            // Initial view
+            showView('balances');
+        });
+    </script>
+</head>
+<body class="bg-gray-50 font-sans antialiased text-gray-800">
+    <div class="min-h-screen flex flex-col items-center p-4 sm:p-6 bg-gray-100">
+        <div class="bg-white rounded-2xl shadow-xl w-full max-w-4xl p-6 sm:p-8 space-y-6">
+            <!-- Header and Navigation -->
+            <header class="flex flex-col sm:flex-row items-center justify-between space-y-4 sm:space-y-0">
+                <h1 class="text-3xl sm:text-4xl font-extrabold text-purple-800">Finanzas Familiares</h1>
+                <div class="flex items-center space-x-2 text-sm text-gray-500" id="userIdDisplay">Cargando...</div>
+            </header>
+
+            <nav class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4 bg-purple-100 rounded-xl p-2 shadow-inner">
+                <button id="navBalances" class="flex-1 py-2 px-4 rounded-lg font-semibold text-sm transition-colors duration-200 hover:bg-purple-200">Balances</button>
+                <button id="navPresupuesto" class="flex-1 py-2 px-4 rounded-lg font-semibold text-sm transition-colors duration-200 hover:bg-purple-200">Presupuesto</button>
+                <button id="navIngresos" class="flex-1 py-2 px-4 rounded-lg font-semibold text-sm transition-colors duration-200 hover:bg-purple-200">Ingresos</button>
+                <button id="navGastos" class="flex-1 py-2 px-4 rounded-lg font-semibold text-sm transition-colors duration-200 hover:bg-purple-200">Gastos</button>
+            </nav>
+
+            <!-- Month and Year Selection -->
+            <div class="flex flex-col sm:flex-row items-center justify-center space-y-2 sm:space-y-0 sm:space-x-4">
+                <div class="flex items-center space-x-2">
+                    <label for="yearSelect" class="font-bold text-gray-700">Año:</label>
+                    <select id="yearSelect" class="p-2 border rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500"></select>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <label for="monthSelect" class="font-bold text-gray-700">Mes:</label>
+                    <select id="monthSelect" class="p-2 border rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500"></select>
+                </div>
+                <button onclick="exportToExcel()" class="bg-blue-600 text-white p-2 rounded-lg font-semibold shadow-md hover:bg-blue-700 transition-colors">Exportar a CSV</button>
+            </div>
+
+            <!-- Main Content Area -->
+            <main>
+                <!-- Balances View -->
+                <section id="balancesView" class="view">
+                    <div class="space-y-4">
+                        <h2 class="text-2xl font-bold text-purple-600 border-b pb-2">Resumen General</h2>
+                        <div id="balancesList" class="overflow-x-auto"></div>
+                    </div>
+                </section>
+
+                <!-- Presupuesto View -->
+                <section id="presupuestoView" class="view hidden">
+                    <div class="space-y-4">
+                        <h2 class="text-2xl font-bold text-purple-600 border-b pb-2">Presupuesto Mensual</h2>
+                        <div class="flex items-center space-x-2">
+                            <span class="font-bold text-gray-700">Total Ingresado:</span>
+                            <span id="totalIngresadoDisplay" class="font-bold text-lg text-green-600"></span>
+                        </div>
+                        <div id="presupuestoList" class="overflow-x-auto"></div>
+                    </div>
+                </section>
+
+                <!-- Ingresos View -->
+                <section id="ingresosView" class="view hidden">
+                    <h2 class="text-2xl font-bold text-purple-600 border-b pb-2">Registro de Ingresos</h2>
+                    <form id="ingresoForm" class="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 bg-gray-50 p-4 rounded-lg shadow-inner">
+                        <input type="date" id="ingresoFecha" required class="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        <input type="text" id="ingresoDescripcion" placeholder="Descripción" required class="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        <input type="number" id="ingresoMonto" placeholder="Monto" required class="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        <input type="hidden" id="ingresoEditId">
+                        <div class="flex flex-col sm:flex-row gap-2 col-span-1 sm:col-span-2 lg:col-span-1">
+                          <button type="submit" id="ingresoSubmitBtn" class="bg-green-600 text-white p-2 rounded-lg font-semibold shadow-md hover:bg-green-700 transition-colors flex-1">Añadir Ingreso</button>
+                          <button type="button" id="ingresoCancelBtn" class="hidden bg-gray-500 text-white p-2 rounded-lg font-semibold shadow-md hover:bg-gray-600 transition-colors flex-1">Cancelar Edición</button>
+                        </div>
+                    </form>
+                    <div id="ingresosList" class="mt-6 overflow-x-auto"></div>
+                </section>
+
+                <!-- Gastos View -->
+                <section id="gastosView" class="view hidden">
+                    <h2 class="text-2xl font-bold text-purple-600 border-b pb-2">Registro de Gastos</h2>
+                    <form id="gastoForm" class="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 bg-gray-50 p-4 rounded-lg shadow-inner">
+                        <input type="date" id="gastoFecha" required class="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        <select id="gastoCategoria" required class="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"></select>
+                        <select id="gastoSubcategoria" required class="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"></select>
+                        <input type="number" id="gastoMonto" placeholder="Monto" required class="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        <input type="hidden" id="gastoEditId">
+                        <div class="flex flex-col sm:flex-row gap-2 col-span-1 sm:col-span-2 lg:col-span-4">
+                            <button type="submit" id="gastoSubmitBtn" class="bg-red-600 text-white p-2 rounded-lg font-semibold shadow-md hover:bg-red-700 transition-colors flex-1">Añadir Gasto</button>
+                            <button type="button" id="gastoCancelBtn" class="hidden bg-gray-500 text-white p-2 rounded-lg font-semibold shadow-md hover:bg-gray-600 transition-colors flex-1">Cancelar Edición</button>
+                        </div>
+                    </form>
+                    <div id="gastosList" class="mt-6 overflow-x-auto"></div>
+                </section>
+            </main>
+        </div>
+    </div>
+    <!-- Confirmation Modal -->
+    <div id="confirmModal" class="hidden fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm text-center space-y-4">
+            <p id="modalMessage" class="text-lg font-semibold text-gray-700">¿Estás seguro de que quieres eliminar este registro?</p>
+            <div class="flex justify-center space-x-4">
+                <button id="cancelBtn" class="py-2 px-6 rounded-lg font-bold bg-gray-300 hover:bg-gray-400 transition-colors">No</button>
+                <button id="confirmBtn" class="py-2 px-6 rounded-lg font-bold bg-red-600 text-white hover:bg-red-700 transition-colors">Sí</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
